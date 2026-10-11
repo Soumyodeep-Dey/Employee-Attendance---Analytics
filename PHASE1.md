@@ -1,5 +1,42 @@
 # Phase 1: foundation and starter review
 
+## Run both services in Docker (local development)
+
+Dockerfile builds Python, dependencies and app code into the API image.
+compose.local.yaml starts that image and MongoDB together. These container files
+are ignored by Git because the assignment forbids submitting a Dockerfile.
+
+```powershell
+docker compose -f compose.local.yaml up -d --build --wait
+docker compose -f compose.local.yaml ps
+docker compose -f compose.local.yaml logs -f api
+```
+
+Swagger: http://localhost:8001/docs. Health: http://localhost:8001/health.
+Port 8001 on Windows forwards to 8000 inside the API container, avoiding a clash
+with an API already running on Windows. API connects to mongodb://mongo:27017:
+`mongo` is the Compose service hostname, not the Windows localhost.
+
+MongoDB starts first; its healthcheck must pass before API startup. The API's
+healthcheck calls /health, which pings MongoDB. The Compose database has its own
+volume, hrone-attendance_mongo_data, separate from the earlier standalone database.
+It starts empty; this is not a migration of standalone MongoDB data.
+MongoDB has no published Windows port in this stack. To inspect it:
+
+```powershell
+docker compose -f compose.local.yaml exec mongo mongosh attendance_db
+```
+
+After changing Python code, repeat the build/start command. Stop the stack with:
+
+```powershell
+docker compose -f compose.local.yaml down
+```
+
+This keeps its data volume. Do not add `-v` unless you intend to delete that data.
+No Windows Python process or virtual environment is needed for this Docker mode.
+The earlier standalone container can be stopped separately if no longer needed.
+
 Python runs FastAPI on port 8000. MongoDB runs separately on port 27017.
 The default connection is local MongoDB; Atlas works by setting MONGO_URI.
 
