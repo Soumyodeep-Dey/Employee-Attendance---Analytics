@@ -1,5 +1,5 @@
 """
-Employee Attendance & Analytics API - phases 1 through 3
+Employee Attendance & Analytics API
 
 Run:  uvicorn app.main:app --port 8000
 Env:  MONGO_URI, MONGO_DB (a local .env is loaded for convenience)
@@ -9,6 +9,7 @@ and API shapes follow openapi.yaml; MongoDB shapes follow DATA_MODEL.md.
 """
 import os
 import calendar
+import json
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -20,6 +21,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from pymongo import MongoClient, ReturnDocument
 from pymongo.errors import DuplicateKeyError, PyMongoError
 from bson.decimal128 import Decimal128
+from bson import json_util
 
 load_dotenv(override=False)
 
@@ -356,6 +358,14 @@ def list_attendance(
     page: Page = 1,
     page_size: PageSize = 20,
 ):
+    command = attendance_command(emp_code, date_from, date_to, status, page, page_size)
+    q = command["filter"]
+    total = db.attendance_logs.count_documents(q, hint=command["hint"])
+    docs = db.attendance_logs.find(q).sort(list(command["sort"].items())).skip(command["skip"]).limit(command["limit"]).hint(command["hint"])
+    return {"items": [attendance_response(d) for d in docs], "total": total, "page": page, "page_size": page_size}
+
+
+def attendance_command(emp_code=None, date_from=None, date_to=None, status=None, page=1, page_size=20):
     try:
         for value in (date_from, date_to):
             if value is not None:
@@ -375,15 +385,14 @@ def list_attendance(
             q["date"]["$lte"] = date_to
     if status:
         q["status"] = status
-    total = db.attendance_logs.count_documents(q)
-    docs = db.attendance_logs.find(q).sort([("date", -1), ("emp_code", 1)]).skip((page - 1) * page_size).limit(page_size)
-    page_docs = [attendance_response(d) for d in docs]
-    return {"items": page_docs, "total": total, "page": page, "page_size": page_size}
+    hint = "emp_code_1_date_-1" if emp_code is not None else (
+        "status_1_date_-1_emp_code_1" if status is not None else "date_-1_emp_code_1")
+    return {"find": "attendance_logs", "filter": q, "sort": {"date": -1, "emp_code": 1},
+            "skip": (page - 1) * page_size, "limit": page_size, "hint": hint}
 
 
 # --------------------------------------------------------------------------- #
-# TODO - final phase:
-#   GET   /admin/explain/{endpoint}
+# Analytics query builders and execution
 # --------------------------------------------------------------------------- #
 
 Month = Annotated[str, Query(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")]
@@ -542,26 +551,76 @@ def department_trend_pipeline(department, first, last):
 
 @app.get("/analytics/employees/{emp_code}/monthly")
 def employee_monthly(emp_code: str, month: Month):
-    pipeline = employee_monthly_pipeline(emp_code, month)
+    command = analytics_command("employee_monthly", month=month, emp_code=emp_code)
     require_employee(emp_code)
-    return next(db.employees.aggregate(pipeline))
+    return next(execute_analytics(command))
 
 
 @app.get("/analytics/departments/summary")
 def department_summary(month: Month, department: str | None = None):
-    return {"month": month, "items": list(db.employees.aggregate(department_summary_pipeline(month, department)))}
+    return {"month": month, "items": list(execute_analytics(analytics_command("department_summary", month=month, department=department)))}
 
 
 @app.get("/analytics/leaderboard/late")
 def late_leaderboard(month: Month, limit: Annotated[int, Query(ge=1, le=50)] = 10,
                      department: str | None = None):
-    return {"month": month, "items": list(db.attendance_logs.aggregate(late_leaderboard_pipeline(month, limit, department)))}
+    return {"month": month, "items": list(execute_analytics(analytics_command("late_leaderboard", month=month, limit=limit, department=department)))}
 
 
 @app.get("/analytics/departments/{department}/trend")
 def department_trend(department: str, from_: Annotated[str, Query(alias="from")],
                      to: Annotated[str, Query()]):
-    pipeline = department_trend_pipeline(department, from_, to)
+    command = analytics_command("department_trend", department=department, first=from_, last=to)
     if db.employees.find_one({"department": department}) is None:
         raise HTTPException(404, "Unknown department")
-    return {"department": department, "items": list(db.employees.aggregate(pipeline))}
+    return {"department": department, "items": list(execute_analytics(command))}
+
+
+def analytics_command(endpoint, month=None, emp_code=None, department=None, limit=10, first=None, last=None):
+    if endpoint == "employee_monthly":
+        if month is None or emp_code is None:
+            invalid("emp_code and month are required", "query")
+        collection, pipeline, hint = "employees", employee_monthly_pipeline(emp_code, month), "emp_code_1"
+    elif endpoint == "department_summary":
+        if month is None:
+            invalid("month is required", "query")
+        collection, pipeline = "employees", department_summary_pipeline(month, department)
+        hint = "department_1_joined_on_1" if department is not None else "joined_on_1_department_1"
+    elif endpoint == "late_leaderboard":
+        if month is None:
+            invalid("month is required", "query")
+        collection, pipeline, hint = "attendance_logs", late_leaderboard_pipeline(month, limit, department), "date_-1_emp_code_1"
+    else:
+        if department is None or first is None or last is None:
+            invalid("department, from and to are required", "query")
+        collection, pipeline, hint = "employees", department_trend_pipeline(department, first, last), "department_1_joined_on_1"
+    return {"aggregate": collection, "pipeline": pipeline, "cursor": {}, "hint": hint}
+
+
+def execute_analytics(command):
+    return db[command["aggregate"]].aggregate(command["pipeline"], hint=command["hint"])
+
+
+ExplainEndpoint = Literal["attendance_list", "employee_monthly", "department_summary", "late_leaderboard", "department_trend"]
+
+
+@app.get("/admin/explain/{endpoint}")
+def explain_endpoint(endpoint: ExplainEndpoint, emp_code: str | None = None,
+                     month: Annotated[str | None, Query(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")] = None,
+                     department: str | None = None,
+                     limit: Annotated[int, Query(ge=1, le=50)] = 10,
+                     date_from: str | None = None, date_to: str | None = None,
+                     status: Status | None = None,
+                     from_: Annotated[str | None, Query(alias="from")] = None, to: str | None = None,
+                     page: Page = 1, page_size: PageSize = 20):
+    if endpoint == "attendance_list":
+        command = attendance_command(emp_code, date_from, date_to, status, page, page_size)
+        collection = command["find"]
+    else:
+        command = analytics_command(endpoint, month, emp_code, department, limit, from_, to)
+        collection = command["aggregate"]
+    explanation = db.command("explain", command, verbosity="executionStats")
+    # Raw plans contain BSON values such as ObjectIds and Decimal128 constants.
+    # Extended JSON preserves them without inventing or removing plan fields.
+    return {"endpoint": endpoint, "collection": collection,
+            "explain": json.loads(json_util.dumps(explanation))}

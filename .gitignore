@@ -8,6 +8,7 @@ PROBLEM_STATEMENT.docx
 openapi.yaml
 DATA_MODEL.md
 sample_data/
+sample_seed.py
 # Local container setup: the hiring submission must not contain a Dockerfile.
 Dockerfile
 compose.local.yaml

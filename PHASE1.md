@@ -56,9 +56,8 @@ forced simultaneous punch-outs/corrections, legacy fields, overnight work,
 
 Phase 3 analytics are now complete; see PHASE3.md for pipeline details.
 
-Pending: explain endpoint, final
-DECISIONS.md, and performance validation. Index choices will be verified against
-the final analytics pipelines rather than assumed correct.
+Phase 4 is complete: explain endpoint, DECISIONS.md and performance validation.
+The full suite contains 20 passing tests. PERFORMANCE.md records the 100k check.
 
 ## Windows setup
 

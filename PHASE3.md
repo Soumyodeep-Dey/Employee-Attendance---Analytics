@@ -1,7 +1,7 @@
 # Phase 3: MongoDB analytics
 
 All pipelines and routes live in app/main.py. Pipeline builders are separate
-from endpoint execution so Phase 4 can explain the exact same queries.
+from endpoint execution so the explain endpoint uses the exact same queries.
 
 | Route | Pipeline approach |
 | --- | --- |
@@ -23,5 +23,5 @@ rank skips, half-up averages, zero denominators and invalid query parameters.
 Docker rebuild: `docker compose -f compose.local.yaml up -d --build --wait`.
 Swagger: http://localhost:8001/docs. Compass: mongodb://127.0.0.1:27018.
 
-Phase 4 remains: explain executionStats, index-plan verification at 100k records,
-and the final DECISIONS.md/submission audit.
+Phase 4 is complete: explain executionStats, index-plan verification at 100k
+records, and final DECISIONS.md. See PERFORMANCE.md and README.md.
