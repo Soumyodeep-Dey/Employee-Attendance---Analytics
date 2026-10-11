@@ -54,7 +54,9 @@ checks and append-only audit history. Ten tests pass across both phases, includi
 forced simultaneous punch-outs/corrections, legacy fields, overnight work,
 24-hour boundaries and status transitions. Tests drop their own disposable databases.
 
-Pending: all analytics, explain endpoint, final
+Phase 3 analytics are now complete; see PHASE3.md for pipeline details.
+
+Pending: explain endpoint, final
 DECISIONS.md, and performance validation. Index choices will be verified against
 the final analytics pipelines rather than assumed correct.
 
