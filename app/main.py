@@ -1,12 +1,11 @@
 """
-Employee Attendance & Analytics API - STARTER
+Employee Attendance & Analytics API - phases 1 and 2
 
 Run:  uvicorn app.main:app --port 8000
 Env:  MONGO_URI, MONGO_DB (a local .env is loaded for convenience)
 
-This file was written quickly by a colleague who has left the company. The happy path
-works, but nobody has reviewed it. Read PROBLEM_STATEMENT.docx for what is expected of you,
-openapi.yaml for the contract and DATA_MODEL.md for what is stored in MongoDB.
+All application code is kept here as required by the assignment. Business rules
+and API shapes follow openapi.yaml; MongoDB shapes follow DATA_MODEL.md.
 """
 import os
 from contextlib import asynccontextmanager
@@ -17,7 +16,7 @@ from typing import Annotated, Literal, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
-from pymongo import MongoClient
+from pymongo import MongoClient, ReturnDocument
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 load_dotenv(override=False)
@@ -141,6 +140,149 @@ class PunchInIn(BaseModel):
     status: Literal["PRESENT", "WFH", "ON_DUTY"] = "PRESENT"
 
 
+class PunchOutIn(BaseModel):
+    emp_code: str
+    punched_at: EpochMillis = Field(default_factory=lambda: int(datetime.now(UTC).timestamp()) * 1000)
+
+
+class RegularizeIn(BaseModel):
+    # Defaults allow omission; explicitly supplied null is still invalid.
+    status: Status = None
+    punch_in: EpochMillis = None
+    punch_out: EpochMillis = None
+    reason: str = Field(min_length=5, max_length=200)
+    regularized_by: str = Field(min_length=1, max_length=50)
+
+
+PRESENCE = {"PRESENT", "WFH", "ON_DUTY"}
+MUTABLE_FIELDS = ("status", "punch_in", "punch_out", "work_hours", "late_minutes",
+                  "overtime_minutes", "half_day")
+FIELD_DEFAULTS = {"punch_in": None, "punch_out": None, "work_hours": None,
+                  "late_minutes": 0, "overtime_minutes": 0, "half_day": False}
+
+
+def invalid(message: str, field: str = "body"):
+    raise HTTPException(422, [{"loc": [field], "msg": message, "type": "value_error"}])
+
+
+def from_millis(value: int) -> datetime:
+    return datetime(1970, 1, 1, tzinfo=UTC) + timedelta(seconds=value // 1000)
+
+
+def require_employee(emp_code: str):
+    employee = db.employees.find_one({"emp_code": emp_code})
+    if employee is None:
+        raise HTTPException(404, "Unknown employee")
+    return employee
+
+
+def validate_duration(punch_in: datetime, punch_out: datetime):
+    duration = (punch_out - punch_in).total_seconds()
+    if duration <= 0 or duration > 86400:
+        invalid("Punch-out must be after punch-in and within 24 hours")
+
+
+def derive_fields(record, employee):
+    if record["status"] not in PRESENCE:
+        return dict(FIELD_DEFAULTS)
+    punch_in = record.get("punch_in")
+    if punch_in is None:
+        invalid("Presence status requires punch-in")
+    if attendance_date(punch_in, employee["shift_start"], employee["shift_end"]) != record["date"]:
+        invalid("Punch-in must remain on the attendance date")
+    start, end = shift_bounds(record["date"], employee["shift_start"], employee["shift_end"])
+    values = {"late_minutes": compute_late_minutes(punch_in, start),
+              "work_hours": None, "overtime_minutes": 0, "half_day": False}
+    punch_out = record.get("punch_out")
+    if punch_out is not None:
+        validate_duration(punch_in, punch_out)
+        values["work_hours"] = compute_work_hours(punch_in, punch_out)
+        values["overtime_minutes"] = compute_overtime(punch_out, end)
+        values["half_day"] = values["work_hours"] < 4.50
+    return values
+
+
+def snapshot_filter(record):
+    """Compare the read snapshot, including history, before one atomic write.
+
+    Missing legacy fields are matched as missing, not as their display defaults.
+    This detects concurrent corrections and punch-outs without schema additions.
+    """
+    query = {"_id": record["_id"]}
+    for field in (*MUTABLE_FIELDS, "history"):
+        query[field] = record[field] if field in record else {"$exists": False}
+    return query
+
+
+@app.post("/attendance/punch-out")
+def punch_out(body: PunchOutIn):
+    employee = require_employee(body.emp_code)
+    ts = from_millis(body.punched_at)
+    # Include closed records: selecting only open records could close an older day.
+    record = db.attendance_logs.find_one(
+        {"emp_code": body.emp_code, "punch_in": {"$type": "date", "$lte": ts}},
+        sort=[("punch_in", -1)],
+    )
+    if record is None:
+        raise HTTPException(404, "No punch-in found")
+    if record.get("punch_out") is not None:
+        raise HTTPException(409, "Record already punched out")
+    validate_duration(record["punch_in"], ts)
+    _, end = shift_bounds(record["date"], employee["shift_start"], employee["shift_end"])
+    hours = compute_work_hours(record["punch_in"], ts)
+    updated = db.attendance_logs.find_one_and_update(
+        snapshot_filter(record),
+        {"$set": {"punch_out": ts, "work_hours": hours,
+                  "overtime_minutes": compute_overtime(ts, end), "half_day": hours < 4.50}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if updated is None:
+        raise HTTPException(409, "Record changed concurrently; retry")
+    return attendance_response(updated)
+
+
+@app.patch("/attendance/{emp_code}/{date}")
+def regularize_attendance(emp_code: str, date: str, body: RegularizeIn):
+    try:
+        validate_date(date)
+    except ValueError:
+        invalid("Date must be YYYY-MM-DD", "path")
+    employee = require_employee(emp_code)
+    record = db.attendance_logs.find_one({"emp_code": emp_code, "date": date})
+    if record is None:
+        raise HTTPException(404, "No attendance record for this date")
+    final = {**FIELD_DEFAULTS, **record}
+    supplied = body.model_fields_set
+    if "status" in supplied:
+        final["status"] = body.status
+    if final["status"] not in PRESENCE:
+        if supplied & {"punch_in", "punch_out"}:
+            invalid("ABSENT/LEAVE cannot have punch times")
+        final["punch_in"] = final["punch_out"] = None
+    else:
+        for field in ("punch_in", "punch_out"):
+            if field in supplied:
+                final[field] = from_millis(getattr(body, field))
+    final.update(derive_fields(final, employee))
+    changes = {}
+    for field in MUTABLE_FIELDS:
+        previous = record.get(field, FIELD_DEFAULTS.get(field))
+        if previous != final[field]:
+            changes[field] = {"from": previous, "to": final[field]}
+    if not changes:
+        invalid("Correction must change at least one field")
+    history = {"at": datetime.now(UTC).replace(microsecond=0), "by": body.regularized_by,
+               "reason": body.reason, "changes": changes}
+    updated = db.attendance_logs.find_one_and_update(
+        snapshot_filter(record),
+        {"$set": {field: final[field] for field in MUTABLE_FIELDS}, "$push": {"history": history}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if updated is None:
+        raise HTTPException(409, "Record changed concurrently; retry")
+    return attendance_response(updated)
+
+
 # --------------------------------------------------------------------------- #
 # Endpoints provided
 # --------------------------------------------------------------------------- #
@@ -238,8 +380,6 @@ def list_attendance(
 
 # --------------------------------------------------------------------------- #
 # TODO - the rest of the contract (see openapi.yaml):
-#   POST  /attendance/punch-out
-#   PATCH /attendance/{emp_code}/{date}
 #   GET   /analytics/employees/{emp_code}/monthly
 #   GET   /analytics/departments/summary
 #   GET   /analytics/leaderboard/late

@@ -1,9 +1,11 @@
 # Employee Attendance & Analytics API
 
-Phase 1 is implemented: employee creation/listing, punch-in, attendance listing,
-validation, time helpers, startup indexes and MongoDB readiness.
+Phases 1 and 2 are implemented: employee creation/listing, punch-in, punch-out,
+attendance listing, manual corrections with audit history, validation, time
+helpers, startup indexes and MongoDB readiness. Concurrent writes use unique
+indexes and atomic snapshot comparisons.
 
-Pending: punch-out, corrections, analytics, explain and final design decisions.
+Pending: analytics, explain and final design decisions.
 
 Requires Python 3.11+ and MongoDB 6.0+ (local Docker or Atlas).
 Install `requirements.txt`, set `MONGO_URI` and `MONGO_DB`, then run:

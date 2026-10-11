@@ -21,7 +21,10 @@ MongoDB starts first; its healthcheck must pass before API startup. The API's
 healthcheck calls /health, which pings MongoDB. The Compose database has its own
 volume, hrone-attendance_mongo_data, separate from the earlier standalone database.
 It starts empty; this is not a migration of standalone MongoDB data.
-MongoDB has no published Windows port in this stack. To inspect it:
+MongoDB is now published on Windows localhost port 27018 for Compass.
+Connect Compass with `mongodb://127.0.0.1:27018` and select `attendance_db`.
+The earlier standalone container must be stopped so it does not occupy this port.
+To inspect MongoDB through a terminal:
 
 ```powershell
 docker compose -f compose.local.yaml exec mongo mongosh attendance_db
@@ -46,7 +49,12 @@ indexes, readiness ping, employee creation/listing, race-safe punch-in, and
 database-side attendance pagination. Response serialization handles nested
 audit dates and supplies defaults for legacy fields.
 
-Pending: punch-out, manual correction, all analytics, explain endpoint, final
+Phase 2 is also complete: punch-out and manual corrections with atomic snapshot
+checks and append-only audit history. Ten tests pass across both phases, including
+forced simultaneous punch-outs/corrections, legacy fields, overnight work,
+24-hour boundaries and status transitions. Tests drop their own disposable databases.
+
+Pending: all analytics, explain endpoint, final
 DECISIONS.md, and performance validation. Index choices will be verified against
 the final analytics pipelines rather than assumed correct.
 
